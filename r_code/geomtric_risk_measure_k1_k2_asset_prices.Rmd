@@ -1,0 +1,507 @@
+---
+title: "A Robust Approach to Construct Coherent Risk Measures"
+author: "Ali Raisolsadat"
+date: "2024-05-29"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(janitor)
+library(latex2exp)
+library(viridisLite)  # For color palette
+library(knitr)
+```
+
+```{r}
+#' Generates CIR process using the Euler-Maruyama method.
+#'
+#' @param T float: Time period.
+#' @param n_steps int: Number of time steps.
+#' @param n_paths int: Number of paths.
+#' @param kappa float: Mean reversion rate.
+#' @param theta float: Long-term mean.
+#' @param sigma float: Volatility parameter.
+#' @param dW matrix: Brownian motion increments.
+#'
+#' @return matrix: Simulated CIR paths.
+cir_em <- function(T, n_steps, n_paths, kappa, theta, sigma, dW) {
+  # Initialize the CIR paths matrix
+  r_paths <- matrix(1, n_paths, n_steps + 1)
+  r_paths[, 1] <- theta
+  
+  # Generate the CIR process using the Euler-Maruyama method
+  for (i in 1:n_steps) {
+    r_paths[, i + 1] <- r_paths[, i] + (kappa * (theta - r_paths[, i]) * T) + sqrt(r_paths[, i]) * sigma * dW[, i]
+  }
+  
+  return(r_paths)
+}
+
+#' Simulates asset prices using the geometric Brownian motion model.
+#'
+#' @param mu float: Drift term.
+#' @param sigma matrix: Volatility (can be time-varying).
+#' @param T float: Time period.
+#' @param n_steps int: Number of time steps.
+#' @param n_paths int: Number of paths.
+#' @param s0 float: Initial asset price.
+#' @param dW matrix: Brownian motion increments.
+#'
+#' @return matrix: Simulated asset price paths.
+simulate_gbm <- function(mu, sigma, T, n_steps, n_paths, s0, dW) {
+  # Initialize the asset price paths matrix
+  s_paths <- matrix(0, n_paths, n_steps + 1)
+  s_paths[, 1] <- s0
+  
+  # Generate asset price process using correlated Brownian motions
+  for (i in 1:n_steps) {
+    s_paths[, i + 1] <- s_paths[, i] + (mu * s_paths[, i] * T) + (sigma[, i] * s_paths[, i] * dW[, i])
+  }
+  
+  return(s_paths)
+}
+
+#' Calculates the call option prices and deltas using the Black-Scholes formula.
+#'
+#' @param S float: Current asset price.
+#' @param K float: Strike price.
+#' @param r float: Risk-free interest rate.
+#' @param q float: Dividend yield.
+#' @param T float: Time to maturity.
+#' @param sigma float: Volatility of the underlying asset.
+#'
+#' @return list: Call option prices and deltas.
+call_option_price <- function(S, K, r, q, T, sigma, n_paths, n_steps) {
+  d1 = matrix(0, nrow = n_paths, ncol = n_steps+1)
+  d2 = matrix(0, nrow = n_paths, ncol = n_steps+1)
+  call_price = matrix(0, nrow = n_paths, ncol = n_steps+1)
+  call_delta = matrix(0, nrow = n_paths, ncol = n_steps+1)
+  
+  for (i in 1:ncol(d1)) {
+    d1[, i] <- (log(S[,i] / K) + (r - q + (sigma^2) / 2) * T[i]) / (sigma * sqrt(T[i]))
+    d2[, i] <- d1[, i] - sigma * sqrt(T[i])
+    call_price[, i] <- S[, i] * exp(-q * T[i]) * pnorm(d1[, i]) - K * exp(-r * T[i]) * pnorm(d2[, i])
+    call_delta[, i] <- pnorm(d1[, i])
+  }
+  
+  return(list(call_price, call_delta))
+}
+
+#' Simulates the delta hedge process for a portfolio of call options.
+#'
+#' @param number_of_shares int: Number of shares.
+#' @param hedging_frequency float: Frequency of hedging.
+#' @param risk_free_rate float: Risk-free interest rate.
+#' @param s_paths matrix: Simulated asset price paths.
+#' @param option_prices matrix: Call option prices.
+#' @param option_deltas matrix: Call option deltas.
+#' @param n_steps int: Number of time steps.
+#' @param n_paths int: Number of paths.
+#'
+#' @return list: Portfolio value and hedge interest.
+call_option_delta_hedge_process <- function(number_of_shares, hedging_frequency, risk_free_rate, s_paths, option_prices, option_deltas, n_steps, n_paths) {
+  value <- matrix(0, n_paths, n_steps + 1)
+  value[, 1] <- option_prices[, 1] * number_of_shares
+  hedge_interest <- matrix(0, n_paths, n_steps + 1)
+  hedge_interest[, 1] <- value[, 1] - number_of_shares * option_deltas[, 1] * s_paths[, 1]
+  
+  # Delta hedge process
+  for (i in 1:n_steps) {
+    value[, i + 1] <- value[, i] + (option_deltas[, i] * (s_paths[, i + 1] - s_paths[, i])) +
+      hedge_interest[, i] * (exp((hedging_frequency / n_steps) * risk_free_rate) - 1)
+    hedge_interest[, i + 1] <- value[, i + 1] - option_deltas[, i + 1] * s_paths[, i + 1]
+  }
+  
+  return(list(value, hedge_interest))
+}
+
+#' Calculate proportions of paths above and below a given threshold relative to a reference value.
+#'
+#' This function computes the proportions of paths in a geometric Brownian motion (GBM) model
+#' that remain either above or below a specified threshold relative to a reference value (R_t).
+#'
+#' @param s_paths_gbm Matrix of simulated asset price paths (GBM) over time.
+#' @param K_threshold Vector of threshold values relative to R_t.
+#' @param R_t Reference value used for threshold computation.
+#' 
+#' @return A list containing:
+#' - prop_below_rt: Vector of proportions of paths below the threshold for each K_threshold value.
+#' - prop_above_rt: Vector of proportions of paths above the threshold for each K_threshold value.
+#'
+calc_prop_above_below_rt_s_paths_portfolio <- function(s_paths_gbm, K_threshold, R_t) {
+  # Initialize vectors to store proportions
+  prop_above_rt <- numeric(length(K_threshold))
+  prop_below_rt <- numeric(length(K_threshold))
+  
+  # Calculate the log of s_paths_gbm once outside the loop to avoid repeated computation
+  log_s_paths_gbm <- log1p(s_paths_gbm)
+  
+  for (i in seq_along(K_threshold)) {
+    # Compute the threshold for the current K_threshold value
+    threshold <- R_t - K_threshold[i]
+    
+    # Create a mask indicating whether each path is above the threshold
+    above_rt_mask <- log_s_paths_gbm > threshold
+    
+    # Check if each path remains above the threshold for all time steps
+    path_complete_mask <- apply(above_rt_mask[, -ncol(above_rt_mask)], 1, all)
+    
+    # Calculate proportion of paths above and below the threshold
+    prop_above_rt[i] <- mean(path_complete_mask)
+    prop_below_rt[i] <- 1 - prop_above_rt[i]  # All paths sum to 1
+  }
+  
+  list(prop_below_rt = prop_below_rt, prop_above_rt = prop_above_rt)
+}
+
+#' Calculate the payoff of a buy-and-hold portfolio at time T.
+#'
+#' @param s Matrix of simulated asset prices at each time step for multiple paths.
+#' @param s0 Numeric value of the initial asset price.
+#' @param r Numeric value of the risk-free rate.
+#' @param T Numeric value of the total time horizon.
+#' @return Numeric vector representing the payoff of the buy-and-hold portfolio at time T for each path.
+buy_hold_portfolio_payoff_T <- function(s, s0, r, T) {
+  return(s[, ncol(s)] - s0 * exp(r * T))
+}
+
+#' Calculate the payoff of a buy-and-hold portfolio at half of the total time horizon.
+#'
+#' @param s Matrix of simulated asset prices at each time step for multiple paths.
+#' @param s0 Numeric value of the initial asset price.
+#' @param r Numeric value of the risk-free rate.
+#' @param T Numeric value of the total time horizon.
+#' @param n_steps Integer value representing the number of time steps.
+#' @return Numeric vector representing the payoff of the buy-and-hold portfolio at half of the total time horizon for each path.
+buy_hold_portfolio_payoff_T_2 <- function(s, s0, r, T, n_steps) {
+  return(s[, n_steps %/% 2] - s0 * exp(r * T / 2))
+}
+
+#' Calculate the payoff of a long call portfolio at time t.
+#'
+#' @param hedged_p Matrix of hedged portfolio values at each time step for multiple paths.
+#' @param call_p Matrix of call option prices at each time step for multiple paths.
+#' @param r Numeric value of the risk-free rate.
+#' @param t Numeric value of the time horizon.
+#' @return Numeric vector representing the payoff of the long call portfolio at time t for each path.
+long_call_portfolio_payoff_T <- function(hedged_p, call_p, r, t) {
+  return(hedged_p[, ncol(hedged_p)] - call_p[, 2] * exp(r * t))
+}
+
+#' Calculate the payoff of a long call portfolio at half of the total time horizon.
+#'
+#' @param hedged_p Matrix of hedged portfolio values at each time step for multiple paths.
+#' @param call_p Matrix of call option prices at each time step for multiple paths.
+#' @param r Numeric value of the risk-free rate.
+#' @param t Numeric value of the total time horizon.
+#' @param n_steps Integer value representing the number of time steps.
+#' @return Numeric vector representing the payoff of the long call portfolio at half of the total time horizon for each path.
+long_call_portfolio_payoff_T_2 <- function(hedged_p, call_p, r, t, n_steps) {
+  return(hedged_p[, n_steps %/% 2] - call_p[, 2] * exp(r * t / 2))
+}
+
+#' Calculate the payoff of a short call portfolio at time t.
+#'
+#' @param hedged_p Matrix of hedged portfolio values at each time step for multiple paths.
+#' @param call_p Matrix of call option prices at each time step for multiple paths.
+#' @param t Integer value of the time step index.
+#' @return Numeric vector representing the payoff of the short call portfolio at time t for each path.
+short_call_portfolio_payoff_T <- function(hedged_p, call_p, t) {
+  return(hedged_p[, t] - call_p[, t])
+}
+
+#' Calculate the payoff of a short call portfolio at half of the total time horizon.
+#'
+#' @param hedged_p Matrix of hedged portfolio values at each time step for multiple paths.
+#' @param call_p Matrix of call option prices at each time step for multiple paths.
+#' @param t Integer value of the total time step index.
+#' @return Numeric vector representing the payoff of the short call portfolio at half of the total time horizon for each path.
+short_call_portfolio_payoff_T_2 <- function(hedged_p, call_p, t) {
+  return(hedged_p[, t %/% 2] - call_p[, t %/% 2])
+}
+
+#' Calculate the new risk measure V_phi(omega, T).
+#'
+#' @param port_value Numeric vector of filtered portfolio values.
+#' @return Numeric value representing the negative minimum value of the portfolio values.
+V_phi_omega_T <- function(port_value) {
+  return(-min(port_value))
+}
+
+#' Calculate the Value at Risk (VaR) at time T for the given portfolio values.
+#'
+#' @param p_t Numeric vector of portfolio values at time T.
+#' @param a Numeric value representing the confidence level for VaR calculation (e.g., 5 for 5% VaR).
+#' @return Numeric value representing the negative value at risk at the specified confidence level.
+V_phi_VaR <- function(p_t, a) {
+  return(-quantile(p_t, probs = a / 100))
+}
+
+#' Calculate the proportion of paths that are above the threshold for k1 and below the threshold for k2.
+#'
+#' @param log_s_paths Matrix of logarithm of the simulated asset paths (log(S(t))).
+#' @param cir_paths Matrix of simulated CIR process paths representing volatility.
+#' @param threshold_k1_values Numeric vector of k1 threshold values to evaluate.
+#' @param threshold_k2_values Numeric vector of k2 threshold values to evaluate.
+#' @param threshold_r_t_base Numeric value of base threshold for the asset paths.
+#' @param mean_vol Numeric value of mean volatility to use as a base for k2 thresholds.
+#' @return Matrix of proportions where each element (i, j) represents the proportion of paths that are above the k1 threshold and below the k2 threshold.
+calculate_prop_k1_k2 <- function(log_s_paths, cir_paths, threshold_k1_values, threshold_k2_values, threshold_r_t_base, mean_vol) {
+
+  # Initialize the matrix to store results
+  threshold_k1_k2_matrix <- matrix(0, nrow = length(threshold_k1_values), ncol = length(threshold_k2_values))
+
+  # Iterate over all k1 values
+  for (i in seq_along(threshold_k1_values)) {
+    k1 <- threshold_k1_values[i]
+    # Calculate the adjusted threshold for k1
+    threshold_r_t_k1 <- threshold_r_t_base - k1
+
+    # Iterate over all k2 values
+    for (j in seq_along(threshold_k2_values)) {
+      k2 <- threshold_k2_values[j]
+      # Calculate the adjusted threshold for k2
+      threshold_v_t_k2 <- mean_vol + k2
+
+      # Create masks for the conditions
+      # Mask where log(S(t)) is above the k1 threshold
+      above_rt_mask_k1 <- log_s_paths > threshold_r_t_k1
+
+      # Mask where CIR paths are below the k2 threshold
+      below_vt_mask_k2 <- cir_paths < threshold_v_t_k2
+
+      # Combine masks to get a single mask where both conditions are satisfied
+      combined_mask <- above_rt_mask_k1 & below_vt_mask_k2
+
+      # Check if each path remains above the k1 threshold and below the k2 threshold for all time steps
+      path_complete_mask <- apply(combined_mask[, -ncol(combined_mask)], 1, all)
+
+      # Calculate proportion of paths that do not satisfy the combined condition
+      threshold_k1_k2_matrix[i, j] <- 1 - mean(path_complete_mask)
+    }
+  }
+
+  return(threshold_k1_k2_matrix)
+}
+
+```
+
+```{r}
+set.seed(123)  # Set seed for reproducibility
+
+# Time variables
+T <- 1.0  # Total time
+n_steps <- 250  # Number of time steps
+n_paths <- 5000  # Number of simulation paths
+dt <- T / (n_steps * T)  # Time step size
+x_axis_t <- seq(0, T, by = dt)  # Time points for x-axis
+
+# CIR process variables
+kappa <- 2  # Mean reversion speed
+theta <- 0.04  # Long-term mean
+sigma <- 0.1  # Volatility of volatility
+
+# Asset price variables
+s0 <- 100  # Initial asset price
+log_s0 <- log1p(s0)  # Log of initial asset price
+mu <- 0.05  # Drift of asset price
+long_term_vol <- round(sqrt(theta), 2)  # Long-term volatility
+
+# Option pricing variables
+risk_free_rate <- 0.05  # Risk-free interest rate
+strike <- 110  # Strike price of the option
+dividend <- 0  # Dividend yield
+number_of_shares <- 1  # Number of shares
+hedging_frequency <- 1  # Frequency of hedging
+dt_seq <- rev(seq(0, T, by = hedging_frequency / n_steps))  # Time steps for option pricing
+dt_seq <- matrix(dt_seq, ncol = 1)  # Ensure dt_seq is 2D for broadcasting
+
+# Create correlated Brownian motion
+dZ <- matrix(rnorm(n_paths * n_steps, mean = 0, sd = sqrt(dt)), nrow = n_paths)  # Standard normal increments for dZ
+dW1 <- matrix(rnorm(n_paths * n_steps, mean = 0, sd = sqrt(dt)), nrow = n_paths)  # Standard normal increments for dW1
+
+# Generate the CIR process for stochastic volatility
+cir_vol_paths <- cir_em(T = dt, n_steps = n_steps, n_paths = n_paths, kappa = kappa, theta = theta, sigma = sigma, dW = dW1)
+
+# Calculate stochastic volatility
+stoc_vol <- sqrt(cir_vol_paths)
+
+```
+
+```{r}
+# Define the correlation coefficient and threshold values
+rho <- -0.3  # Correlation coefficient
+single_k1_threshold <- 0.25  # Threshold value for k1
+single_k2_threshold <- 0.02  # Threshold value for k2
+
+# Generate correlated Brownian motion dW2
+dW2 <- (rho * dW1) + (sqrt(1 - rho^2) * dZ)
+
+# Generate stochastic asset prices using geometric Brownian motion with the correlated dW2
+s_paths_gbm <- simulate_gbm(mu = mu, sigma = stoc_vol, T = dt, n_steps = n_steps, n_paths = n_paths, s0 = s0, dW = dW2)
+
+# Calculate the thresholds
+threshold_r_t_k1 <- (mu - (0.5 * long_term_vol^2)) * (0:n_steps * dt) + log_s0 - single_k1_threshold
+threshold_v_t_k2 <- rep(theta, length(threshold_r_t_k1)) + single_k2_threshold
+
+# Create masks for the conditions where asset price paths are above/below the thresholds
+above_rt_mask_k1 <- matrix(FALSE, nrow = n_paths, ncol = n_steps + 1)
+below_vt_mask_k2 <- matrix(FALSE, nrow = n_paths, ncol = n_steps + 1)
+
+for (i in 1:n_paths) {
+  above_rt_mask_k1[i, ] <- log1p(s_paths_gbm[i, ]) > threshold_r_t_k1
+  below_vt_mask_k2[i, ] <- cir_vol_paths[i, ] < threshold_v_t_k2
+}
+```
+
+```{r, out.width="100%"}
+# First subplot for Risky Asset Price Paths and Threshold R_t - K1
+plot(NULL, xlim = c(0, max(x_axis_t)), ylim = range(log1p(s_paths_gbm), threshold_r_t_k1), 
+     xlab = TeX('Time $(t)$'), ylab = TeX('$log(S_t)$'), 
+     main = TeX("Risky Asset Price Paths with Threshold $R(t) - K_1$"), cex.main = 0.9)
+
+for (i in 1:n_paths) {
+  color <- if (all(above_rt_mask_k1[i, ])) "blue" else "red"
+  lines(x_axis_t, log1p(s_paths_gbm[i, ]), col = color)
+}
+lines(x_axis_t, threshold_r_t_k1, col = "black", lty = 2)
+legend("bottom", legend = c(expression(log(S(t)) > R(t) - K[1]), expression(log(S(t)) <= R(t) - K[1]), expression(R(t) - K[1])), 
+        col = c("blue", "red", "black"), lwd = 2, lty = c(1, 1, 2), horiz = TRUE, cex = 0.6, inset = c(0, 0.9), xpd = TRUE)
+mtext(TeX(sprintf(r'($K_1 = %f$, $\rho = %f$)', single_k1_threshold, rho)), side = 3, line = 0.4, cex = 0.9)
+
+# Second subplot for Instantaneous Volatility Paths with Euler-Maruyama with θ + K2 threshold
+plot(NULL, xlim = c(0, max(x_axis_t)), ylim = range(cir_vol_paths, threshold_v_t_k2), 
+     xlab = TeX('Time $(t)$'), ylab = TeX('$V(t)$'), 
+     main = TeX('Instantaneous Volatility Paths (Euler-Maruyama Method) and Threshold $\\theta + K_{2}$'), cex.main = 0.9)
+
+for (i in 1:n_paths) {
+  color <- if (all(below_vt_mask_k2[i, ])) "blue" else "red"
+  lines(x_axis_t, cir_vol_paths[i, ], col = color)
+}
+
+lines(x_axis_t, threshold_v_t_k2, col = "black", lty = 2)
+legend("bottom", legend = c(TeX('$V(t) < \\theta + K_2$'), TeX('$V(t) \\geq \\theta + K_2$'), TeX('$\\theta + K_2$')), 
+        col = c("blue", "red", "black"), lwd = 2, lty = c(1, 1, 2), horiz = TRUE, cex = 0.6, inset = c(0, 0.9), xpd = TRUE)
+mtext(TeX(sprintf(r'($K_2 = %f$, $\theta = %f$)', single_k2_threshold, theta)), side = 3, line = 0.4, cex = 0.9)
+```
+
+
+```{r}
+# Generate arrays for rho and K_threshold
+rho <- seq(-1, 1, length.out = 21)  # Create an array of rho values from -1 to 1
+threshold_k1_values <- seq(0, 1.0, length.out = 50)  # 100 values from 0 to 1.0 for k1
+threshold_k2_values <- seq(0, 0.2, length.out = 50)  # 100 values from 0 to 0.2 for k2
+target_alpha_values <- c(0.001, 0.01, 0.05, 0.1) # define the target alpha values
+alpha_percentiles <- target_alpha_values * 100 # convert alpha values to percentiles for VaR calculation
+
+# Initialize lists to store results for multiple rho and K_threshold values
+multiple_k_thresholds <- vector("list", length(rho))
+multiple_rho_s_paths <- vector("list", length(rho))
+portfolio_value_T_matrix <- vector("list", length(rho))
+
+# Initialize a list to store results
+results_list <- list()
+
+# Calculate the threshold value R_t based on initial conditions
+threshold_r_t <- (mu - (0.5 * long_term_vol^2)) * (seq(0, n_steps, length.out = n_steps + 1) * dt) + log_s0
+
+# Loop over each rho value
+for (i in seq_along(rho)) {
+    # Calculate correlated Brownian motion dW2 using the current rho value
+    dW2 <- rho[i] * dW1 + sqrt(1 - rho[i]^2) * dZ
+
+    # Simulate the risky asset price paths using geometric Brownian motion with the correlated dW2
+    s_paths_gbm <- simulate_gbm(mu = mu, sigma = stoc_vol, T = dt, n_steps = n_steps, n_paths = n_paths, s0 = s0, dW = dW2)
+    log_s_paths_gbm <- log1p(s_paths_gbm)  # Logarithm of the simulated asset price paths
+
+    # Calculate the proportion of paths below the thresholds for each combination of k1 and k2
+    threshold_k1_k2_matrix <- calculate_prop_k1_k2(
+        log_s_paths = log_s_paths_gbm,        # Logarithm of simulated asset price paths
+        cir_paths = cir_vol_paths,            # CIR process paths for stochastic volatility
+        threshold_k1_values = threshold_k1_values,  # Array of k1 threshold values
+        threshold_k2_values = threshold_k2_values,  # Array of k2 threshold values
+        threshold_r_t_base = threshold_r_t,         # Base threshold R(t) - k1
+        mean_vol = theta                           # Mean reversion level for volatility
+    )
+    # Store the results (proportions below threshold) in the multiple_k_thresholds list
+    multiple_k_thresholds[[i]] <- threshold_k1_k2_matrix
+
+    # Store the asset prices with different correlation values for further analysis
+    multiple_rho_s_paths[[i]] <- s_paths_gbm
+
+    # Compute the portfolio value at time T for each path
+    portfolio_value_T_matrix[[i]] <- buy_hold_portfolio_payoff_T(s = s_paths_gbm, s0 = s0, r = risk_free_rate, T = T)
+}
+
+```
+
+
+```{r}
+# Define the ranges and target alphas
+rho_values <- seq(-1, 1, length.out = 21)  # Create an array of rho values from -1 to 1
+threshold_k1_values <- seq(0, 1.0, length.out = 50)  # 50 values from 0 to 1.0 for k1
+threshold_k2_values <- seq(0, 0.1, length.out = 50)  # 50 values from 0 to 0.1 for k2
+
+# Define target alphas
+target_alpha_values <- c(0.01, 0.05, 0.1)
+results_list <- list()  # List to store results for each alpha
+
+# Calculate the threshold value R_t based on initial conditions
+threshold_r_t <- (mu - (0.5 * long_term_vol^2)) * (seq(0, n_steps, length.out = n_steps + 1) * dt) + log_s0 
+
+# Loop through each value of rho
+for (idx in seq_along(rho_values)) {
+  k1_k2_mat <- multiple_k_thresholds[[idx]]  # Extract k1 and k2 thresholds for current rho
+  
+  # Loop through each alpha value
+  for (alpha in target_alpha_values) {
+    # Calculate the absolute differences between the matrix elements and alpha
+    diff <- abs(k1_k2_mat - alpha)
+    
+    # Find the minimum difference
+    min_diff <- min(diff)
+    
+    # Find all indices where the difference equals the minimum difference
+    indices <- which(diff == min_diff, arr.ind = TRUE)
+    
+    new_risk_measure_list <- vector("list", length = nrow(indices))
+    var_risk_measure_list <- vector("list", length = nrow(indices))
+    for (i in seq_len(nrow(indices))) {
+      k1_thresh_val <- threshold_k1_values[indices[i, 1]]  # Get k1 threshold value
+      k2_thresh_val <- threshold_k2_values[indices[i, 2]]  # Get k2 threshold value
+      
+      # Create masks for the conditions (above k1 threshold and below k2 threshold)
+      above_rt_mask_k1 <- log1p(multiple_rho_s_paths[[idx]]) > (threshold_r_t - k1_thresh_val)
+      below_vt_mask_k2 <- cir_vol_paths < (theta + k2_thresh_val)
+      
+      # Combine masks to get a single mask where both conditions are satisfied
+      combined_mask <- above_rt_mask_k1 & below_vt_mask_k2
+      valid_indices <- rowSums(combined_mask) == n_steps + 1  # Find paths satisfying both conditions
+      
+      # Compute new risk measure and VaR measure
+      new_risk_measure_list[[i]] <- V_phi_omega_T(portfolio_value_T_matrix[[idx]][valid_indices])
+      var_risk_measure_list[[i]] <- V_phi_VaR(portfolio_value_T_matrix[[idx]], a = alpha * 100)
+    }
+    
+    # Store the results in the list
+    results_list[[length(results_list) + 1]] <- data.frame(
+      rho = rep(rho_values[idx], length(new_risk_measure_list)),
+      alpha = rep(alpha, length(new_risk_measure_list)),
+      k1 = threshold_k1_values[indices[, 1]],
+      k2 = threshold_k2_values[indices[, 2]],
+      new_risk_measure = unlist(new_risk_measure_list),
+      var_risk_measure = unlist(var_risk_measure_list)
+    )
+  }
+}
+
+# Combine all the results into a single data frame
+results_df <- bind_rows(results_list)
+
+# Print the results in a kable table
+kable(results_df, format = "markdown", row.names = FALSE)
+
+```
+
