@@ -293,6 +293,102 @@ plot_price_option_paths <- function(x_axis_t, log_s_paths_gbm, call_option_price
   mtext(subtitle_text, side = 3, line = 0.4, cex = 0.9)
 }
 
+#' Find Minimum Points After Discarding Alpha Values
+#'
+#' This function discards a specified proportion (`alpha`) of the smallest distances
+#' and then finds the row with the minimum portfolio value.
+#'
+#' @param df A data frame containing portfolio values and distances.
+#' @param alpha A numeric value representing the proportion of rows to discard.
+#' @return A data frame containing the row with the minimum portfolio value after discarding.
+find_minimum_df <- function(df, alpha) {
+  n_discard <- ceiling(nrow(df) * alpha)
+  tail_df <- tail(df, nrow(df) - n_discard)
+  tail_df[tail_df$Portfolio_Value_T == min(tail_df$Portfolio_Value_T), ]
+}
+
+#' Highlight and Annotate Minimum Points for Each Alpha Value
+#'
+#' This function adds points and labels to a ggplot object to highlight and annotate
+#' the minimum portfolio values for each alpha value.
+#'
+#' @param plot A ggplot object to which the points and labels will be added.
+#' @param df A data frame containing the points to be highlighted and annotated.
+#' @param color A character string representing the color of the points and labels.
+#' @param label_y_offset A numeric value specifying the vertical offset for the labels.
+#' @return A ggplot object with the added points and labels.
+highlight_and_annotate <- function(plot, df, color, label_x_offset, label_y_offset) {
+  plot + 
+    geom_point(data = df, aes(x = Min_Distances, y = Portfolio_Value_T), color = color, size = 3) +
+    geom_label(data = df, aes(x = Min_Distances + label_x_offset, y = Portfolio_Value_T + 
+                                label_y_offset, label = paste("risk measure =", round(Portfolio_Value_T, 2))), 
+               size = 3, color = color, fill = "lightblue", label.size = 0.25, vjust = -1)
+}
+
+#' Plot Portfolio Values vs. Minimum Distances
+#'
+#' This function creates a scatter plot of portfolio values vs. minimum distances, 
+#' adds intercept lines for specified alpha values with different line types, and highlights and annotates
+#' the minimum points for each alpha value.
+#'
+#' @param portfolio_df A data frame containing the portfolio values and minimum distances.
+#' @param intercept_lines A data frame containing the intercept lines for the plot.
+#' @param first_minimum_df A data frame containing the first minimum points to be highlighted and annotated.
+#' @param second_minimum_df A data frame containing the second minimum points to be highlighted and annotated.
+#' @param third_minimum_df A data frame containing the third minimum points to be highlighted and annotated.
+#' @param alpha_values A numeric vector of alpha values.
+#' @return A ggplot object displaying the plot.
+#' @import ggplot2
+#' @importFrom ggtext TeX
+plot_portfolio_values <- 
+  function(portfolio_df, intercept_lines, first_minimum_df, second_minimum_df, third_minimum_df, alpha_values, type="long") {
+    if(type == "short") {
+      x_offset_val = -0.1
+      y1_offset_val = -3
+      y2_offset_val = -4.25
+      y3_offset_val = -5.50
+    } else {
+      x_offset_val = 0.1
+      y1_offset_val = -20
+      y2_offset_val = -30
+      y3_offset_val = -40
+    }
+    
+    p <- 
+      ggplot(portfolio_df, aes(x = Min_Distances, y = Portfolio_Value_T)) +
+      geom_point(color = "black", alpha = 0.5, size = 1.5) +
+      labs(x = expression(M(t) == min(f(t) - g(t))), y = expression(V[phi](omega, T)),
+           title = expression(Portfolio~Value~V[phi](omega, T)~vs.~Minimum~Distance~M(t))) +
+      theme_bw() +
+      theme(plot.title = element_text(hjust = 0.5))
+    
+    # Add intercept lines for each alpha value with different line types
+    p <- p + 
+      geom_line(data = intercept_lines, aes(x = x, y = y, color = alpha, linetype = alpha), size = 1) +
+      scale_color_manual(values = c("darkgreen", "darkblue", "orangered"), 
+                         labels = c(TeX(sprintf(r'($\alpha = %.3f$)', alpha_values[1])),
+                                    TeX(sprintf(r'($\alpha = %.3f$)', alpha_values[2])),
+                                    TeX(sprintf(r'($\alpha = %.3f$)', alpha_values[3]))),
+                         name = "Alpha Values") +
+      scale_linetype_manual(values = c("dotted", "dashed", "solid"),
+                            labels = c(TeX(sprintf(r'($\alpha = %.3f$)', alpha_values[1])),
+                                       TeX(sprintf(r'($\alpha = %.3f$)', alpha_values[2])),
+                                       TeX(sprintf(r'($\alpha = %.3f$)', alpha_values[3]))),
+                            name = "Alpha Values")
+    
+
+    p <- highlight_and_annotate(p, first_minimum_df, "darkgreen", x_offset_val, y3_offset_val)
+    p <- highlight_and_annotate(p, second_minimum_df, "darkblue", x_offset_val, y2_offset_val)
+    p <- highlight_and_annotate(p, third_minimum_df, "orangered", x_offset_val, y1_offset_val)
+    
+    # Add legend
+    p <- p + theme(legend.position = "right") +
+      guides(color = guide_legend(title = TeX('$\\alpha$ Values')),
+             linetype = guide_legend(title = TeX('$\\alpha$ Values')))
+    
+    # Display the plot
+    print(p)
+}
 ```
 
 ```{r}
@@ -566,6 +662,7 @@ for (i in seq_along(rho)) {
   call_option_prices <- call_option_results[[1]]
   call_option_deltas <- call_option_results[[2]]
   
+  # Compute the delta hedged portfolio for the option
   call_delta_hedged_results <- call_option_delta_hedge_process(number_of_shares, hedging_frequency, risk_free_rate, 
                                                          s_paths_gbm, call_option_prices, call_option_deltas, n_steps, n_paths)
   call_delta_hedged_prices <- call_delta_hedged_results[[1]]
@@ -733,12 +830,17 @@ rownames(result_df) <- NULL
 kable(result_df, format = "markdown")
 ```
 
-```{r, out.width="100%"}
+```{r}
 # Consider the largest K1 amount to include all the portfolio values
 k1 <- 1
 rho <- 0.5
 weight_q <- 0.25
 alpha_values <- c(0.01, 0.05, 0.10)
+upper_bound = 10
+lower_bound = -10
+
+# Average realized volatility from the CIR process simulations
+average_realized_volatility <- rowMeans(sqrt(cir_vol_paths))
 
 # Calculate dW2 using the correlation coefficient rho
 dW2 <- (rho * dW1) + (sqrt(1 - rho^2) * dZ)
@@ -749,22 +851,32 @@ s_paths_gbm <- simulate_gbm(mu=mu, sigma=stoc_vol, T=dt, n_steps=n_steps, n_path
 # Exclude proportion that are extreme
 log_of_asset_prices <- log1p(s_paths_gbm)  # Log transformation of asset prices
 
-# Calculate the threshold value R_t based on initial conditions
-threshold_r_t <- (mu - (0.5 * long_term_vol^2)) * (0:n_steps * dt) + log_s0
-
-# Pre-compute the portfolio value at time T for each path
-portfolio_value_T <- buy_hold_portfolio_payoff_T(s=s_paths_gbm, s0=s0, r=risk_free_rate, T=T)
-value_of_portfolio_T_2 <- buy_hold_portfolio_payoff_T_2(s=s_paths_gbm, s0=s0, r=risk_free_rate, T=T, n_steps=n_steps)
-
 # Find the minimum distance. If it is negative then they are below (threshold - k1), so we remove them
 min_distances <- apply(log_of_asset_prices - (threshold_r_t - k1), 1, min)
 min_distances[min_distances < 0] <- NA
 
+# Calculate the threshold value R_t based on initial conditions
+threshold_r_t <- (mu - (0.5 * long_term_vol^2)) * (0:n_steps * dt) + log_s0
+
+# Calculate the call option prices and their corresponding delta values using the Black-Scholes formula
+call_option_results <- call_option_price(s_paths_gbm, strike, risk_free_rate, dividend, dt_seq, long_term_vol, n_paths, n_steps)
+call_option_prices <- call_option_results[[1]]
+call_option_deltas <- call_option_results[[2]]
+  
+# Compute the delta hedged portfolio for the option
+call_delta_hedged_results <- call_option_delta_hedge_process(number_of_shares, hedging_frequency, risk_free_rate, 
+                                                         s_paths_gbm, call_option_prices, call_option_deltas, n_steps, n_paths)
+call_delta_hedged_prices <- call_delta_hedged_results[[1]]
+```
+
+
+```{r, out.width="100%"}
+# Pre-compute the portfolio value at time T for each path
+portfolio_value_T <- buy_hold_portfolio_payoff_T(s=s_paths_gbm, s0=s0, r=risk_free_rate, T=T)
+value_of_portfolio_T_2 <- buy_hold_portfolio_payoff_T_2(s=s_paths_gbm, s0=s0, r=risk_free_rate, T=T, n_steps=n_steps)
+
 # Ensure that the distances are set to NA if corresponding portfolio value is NA
 min_distances[is.na(portfolio_value_T)] <- NA
-
-# Average realized volatility from the CIR process simulations
-average_realized_volatility <- rowMeans(sqrt(cir_vol_paths))
 
 # Create data frame to store calculated values
 portfolio_df <- data.frame(
@@ -790,77 +902,160 @@ ex3_risk_measure_value <- (-1) * min(portfolio_df$Ex3_Risk_Measure, na.rm = TRUE
 cat(sprintf('The half time risk measure for buy-and-hold position is %.5f with correlation value of %.2f and K1 = %.2f\n',
             ex3_risk_measure_value, rho, single_k1_threshold))
 
-# Put the portfolio values in order and remove NA values
+# Order portfolio_df by Min_Distances and remove NA values
 portfolio_df <- portfolio_df[!is.na(portfolio_df$Portfolio_Value_T), ]
 portfolio_df <- portfolio_df[order(portfolio_df$Min_Distances), ]
 
-# Now find and discard alpha values from the left. These are the distances that are closest to the y-axis.
-# After discarding alpha portfolio values, find the minimum points (our risk measures).
-second_portfolio_df <- tail(portfolio_df, n_paths - (n_paths * alpha_values[1]))
-first_minimum_df <- second_portfolio_df[second_portfolio_df$Portfolio_Value_T == min(second_portfolio_df$Portfolio_Value_T), ]
 
-third_portfolio_df <- tail(portfolio_df, n_paths - (n_paths * alpha_values[2]))
-second_minimum_df <- third_portfolio_df[third_portfolio_df$Portfolio_Value_T == min(third_portfolio_df$Portfolio_Value_T), ]
+# Find minimum points for each alpha value
+first_minimum_df <- find_minimum_df(portfolio_df, alpha_values[1])
+second_minimum_df <- find_minimum_df(portfolio_df, alpha_values[2])
+third_minimum_df <- find_minimum_df(portfolio_df, alpha_values[3])
 
-fourth_portfolio_df <- tail(portfolio_df, n_paths - (n_paths * alpha_values[3]))
-third_minimum_df <- fourth_portfolio_df[fourth_portfolio_df$Portfolio_Value_T == min(fourth_portfolio_df$Portfolio_Value_T), ]
-
-# Create the intercepts for alpha values. A line in the plot is an intercept which shows the
-# exclusion of alpha amount trajectories.
-upper_intercept <- portfolio_df[portfolio_df$Portfolio_Value_T == max(portfolio_df$Portfolio_Value_T), ]
-lower_intercept <- portfolio_df[portfolio_df$Portfolio_Value_T == min(portfolio_df$Portfolio_Value_T), ]
-
+# Create intercept lines
 intercept <- data.frame(
-  y_values = seq(from = as.numeric(lower_intercept$Portfolio_Value_T) - 5, to = as.numeric(upper_intercept$Portfolio_Value_T), length.out = n_steps),
+  y_values = seq(from = min(portfolio_df$Portfolio_Value_T) - 5, to = max(portfolio_df$Portfolio_Value_T), length.out = n_steps),
   x_values_1 = rep(k1, n_steps),
-  x_values_2 = rep(as.numeric(second_portfolio_df$Min_Distances[1]), n_steps),
-  x_values_3 = rep(as.numeric(third_portfolio_df$Min_Distances[1]), n_steps),
-  x_values_4 = rep(as.numeric(fourth_portfolio_df$Min_Distances[1]), n_steps)
+  x_values_2 = rep(first_minimum_df$Min_Distances[1], n_steps),
+  x_values_3 = rep(second_minimum_df$Min_Distances[1], n_steps),
+  x_values_4 = rep(third_minimum_df$Min_Distances[1], n_steps)
 )
 
-# Create data frames for the intercept lines
 intercept_lines <- data.frame(
   x = c(intercept$x_values_2, intercept$x_values_3, intercept$x_values_4),
   y = c(intercept$y_values, intercept$y_values, intercept$y_values),
-  alpha = factor(rep(alpha_values, each = length(intercept$x_values_2)))
+  alpha = factor(rep(alpha_values[1:3], each = length(intercept$y_values)))
 )
 
-# Create the initial scatter plot for portfolio values
-p <- ggplot(portfolio_df, aes(x = Min_Distances, y = Portfolio_Value_T)) +
-  geom_point(color = "black", alpha = 0.5, size = 1.5) +
-  labs(x = expression(M(t) == min(f(t) - g(t))), y = expression(V[phi](omega, T)),
-       title = expression(Portfolio~Value~V[phi](omega, T)~vs.~Minimum~Distance~M(t))) +
-  theme_bw() +
-  theme(plot.title = element_text(hjust = 0.5))
-
-# Add intercept lines for each alpha value with color
-p <- p + geom_line(data = intercept_lines, aes(x = x, y = y, color = alpha), size = 1) +
-  scale_color_manual(values = c("blue", "green", "red"), 
-                     labels = c(TeX(sprintf(r'($\alpha = %f$)', alpha_values))),
-                     name = "Alpha Values")
-
-# Highlight and annotate the first minimum points
-p <- p + geom_point(data = first_minimum_df, aes(x = Min_Distances, y = Portfolio_Value_T), color = "blue", size = 3) +
-  geom_label(data = first_minimum_df, aes(x = Min_Distances, y = Portfolio_Value_T - 40, label = paste("risk measure =", round(Portfolio_Value_T, 2))), 
-             size = 3, color = "blue", fill = "lightblue", label.size = 0.25, vjust = -1)
-
-# Highlight and annotate the second minimum points
-p <- p + geom_point(data = second_minimum_df, aes(x = Min_Distances, y = Portfolio_Value_T), color = "green", size = 3) +
-  geom_label(data = second_minimum_df, aes(x = Min_Distances, y = Portfolio_Value_T - 30, label = paste("risk measure =", round(Portfolio_Value_T, 2))), 
-             size = 3, color = "green", fill = "pink", label.size = 0.25, vjust = -1)
-
-# Highlight and annotate the third minimum points
-p <- p + geom_point(data = third_minimum_df, aes(x = Min_Distances, y = Portfolio_Value_T), color = "red", size = 3) +
-  geom_label(data = third_minimum_df, aes(x = Min_Distances, y = Portfolio_Value_T - 20, label = paste("risk measure =", round(Portfolio_Value_T, 2))), 
-             size = 3, color = "red", fill = "lightgrey", label.size = 0.25, vjust = -1)
+# Create the scatter plot for portfolio values and distinguish different new risk measures for different alpha levels
+plot_portfolio_values(portfolio_df, intercept_lines, first_minimum_df, second_minimum_df, third_minimum_df, alpha_values)
+```
 
 
-# Add legend
-p <- p + theme(legend.position = "right") +
-  guides(color = guide_legend(title = TeX('$\\alpha$ Values')))
 
-# Display the plot
-print(p)
+
+```{r, out.width="100%"}
+# Compute the portfolio value at time T for each path
+portfolio_value_T <- long_call_portfolio_payoff_T(hedged_p=call_delta_hedged_prices, call_p=call_option_prices, r=risk_free_rate, t=T)
+value_of_portfolio_T_2 <- 
+  long_call_portfolio_payoff_T_2(hedged_p = call_delta_hedged_prices, call_p = call_option_prices, r = risk_free_rate, t = T, n_steps = n_steps)
+
+# Ensure that the distances are set to NA if corresponding portfolio value is NA
+min_distances[is.na(portfolio_value_T)] <- NA
+
+# Create data frame to store calculated values
+portfolio_df <- data.frame(
+  Average_Realized_Volatility = average_realized_volatility,
+  Portfolio_Value_T = portfolio_value_T,
+  Portfolio_Value_T_2 = value_of_portfolio_T_2,
+  Min_Distances = min_distances
+)
+
+# Add risk measure selection to portfolio_df
+portfolio_df$Ex3_Risk_Measure <- ((1 - weight_q) * portfolio_df$Portfolio_Value_T) + (weight_q * portfolio_df$Portfolio_Value_T_2)
+
+# Calculate percent omitted
+percent_omitted <- (sum(is.na(portfolio_df$Portfolio_Value_T)) / n_paths) * 100
+
+# Calculate new risk measure value
+new_risk_measure_value <- (-1) * min(portfolio_df$Portfolio_Value_T, na.rm = TRUE)
+cat(sprintf('The full time risk measure for buy-and-hold position is %.5f with correlation value of %.2f and K1 = %.2f\n',
+            new_risk_measure_value, rho, single_k1_threshold))
+
+# Calculate example 3 new risk measure value
+ex3_risk_measure_value <- (-1) * min(portfolio_df$Ex3_Risk_Measure, na.rm = TRUE)
+cat(sprintf('The half time risk measure for buy-and-hold position is %.5f with correlation value of %.2f and K1 = %.2f\n',
+            ex3_risk_measure_value, rho, single_k1_threshold))
+
+# Order portfolio_df by Min_Distances and remove NA values
+portfolio_df <- portfolio_df[!is.na(portfolio_df$Portfolio_Value_T), ]
+portfolio_df <- portfolio_df[order(portfolio_df$Min_Distances), ]
+
+
+# Find minimum points for each alpha value
+first_minimum_df <- find_minimum_df(portfolio_df, alpha_values[1])
+second_minimum_df <- find_minimum_df(portfolio_df, alpha_values[2])
+third_minimum_df <- find_minimum_df(portfolio_df, alpha_values[3])
+
+# Create intercept lines
+intercept <- data.frame(
+  y_values = seq(from = min(portfolio_df$Portfolio_Value_T) - 5, to = max(portfolio_df$Portfolio_Value_T), length.out = n_steps),
+  x_values_1 = rep(k1, n_steps),
+  x_values_2 = rep(first_minimum_df$Min_Distances[1], n_steps),
+  x_values_3 = rep(second_minimum_df$Min_Distances[1], n_steps),
+  x_values_4 = rep(third_minimum_df$Min_Distances[1], n_steps)
+)
+
+intercept_lines <- data.frame(
+  x = c(intercept$x_values_2, intercept$x_values_3, intercept$x_values_4),
+  y = c(intercept$y_values, intercept$y_values, intercept$y_values),
+  alpha = factor(rep(alpha_values[1:3], each = length(intercept$y_values)))
+)
+
+# Create the scatter plot for portfolio values and distinguish different new risk measures for different alpha levels
+plot_portfolio_values(portfolio_df, intercept_lines, first_minimum_df, second_minimum_df, third_minimum_df, alpha_values)
+```
+
+```{r, out.width="100%"}
+# Compute the portfolio value at time T for each path
+portfolio_value_T <- short_call_portfolio_payoff_T(hedged_p = call_delta_hedged_prices, call_p = call_option_prices, t = n_steps)
+value_of_portfolio_T_2 <- 
+  short_call_portfolio_payoff_T_2(hedged_p = call_delta_hedged_prices, call_p = call_option_prices, t = n_steps)
+
+# Ensure that the distances are set to NA if corresponding portfolio value is NA
+min_distances[is.na(portfolio_value_T)] <- NA
+
+# Create data frame to store calculated values
+portfolio_df <- data.frame(
+  Average_Realized_Volatility = average_realized_volatility,
+  Portfolio_Value_T = portfolio_value_T,
+  Portfolio_Value_T_2 = value_of_portfolio_T_2,
+  Min_Distances = min_distances
+)
+
+# Add risk measure selection to portfolio_df
+portfolio_df$Ex3_Risk_Measure <- ((1 - weight_q) * portfolio_df$Portfolio_Value_T) + (weight_q * portfolio_df$Portfolio_Value_T_2)
+
+# Calculate percent omitted
+percent_omitted <- (sum(is.na(portfolio_df$Portfolio_Value_T)) / n_paths) * 100
+
+# Calculate new risk measure value
+new_risk_measure_value <- (-1) * min(portfolio_df$Portfolio_Value_T, na.rm = TRUE)
+cat(sprintf('The full time risk measure for buy-and-hold position is %.5f with correlation value of %.2f and K1 = %.2f\n',
+            new_risk_measure_value, rho, single_k1_threshold))
+
+# Calculate example 3 new risk measure value
+ex3_risk_measure_value <- (-1) * min(portfolio_df$Ex3_Risk_Measure, na.rm = TRUE)
+cat(sprintf('The half time risk measure for buy-and-hold position is %.5f with correlation value of %.2f and K1 = %.2f\n',
+            ex3_risk_measure_value, rho, single_k1_threshold))
+
+# Order portfolio_df by Min_Distances and remove NA values
+portfolio_df <- portfolio_df[!is.na(portfolio_df$Portfolio_Value_T), ]
+portfolio_df <- portfolio_df[order(portfolio_df$Min_Distances), ]
+
+
+# Find minimum points for each alpha value
+first_minimum_df <- find_minimum_df(portfolio_df, alpha_values[1])
+second_minimum_df <- find_minimum_df(portfolio_df, alpha_values[2])
+third_minimum_df <- find_minimum_df(portfolio_df, alpha_values[3])
+
+# Create intercept lines
+intercept <- data.frame(
+  y_values = seq(from = lower_bound, to = upper_bound, length.out = n_steps),
+  x_values_1 = rep(k1, n_steps),
+  x_values_2 = rep(first_minimum_df$Min_Distances[1], n_steps),
+  x_values_3 = rep(second_minimum_df$Min_Distances[1], n_steps),
+  x_values_4 = rep(third_minimum_df$Min_Distances[1], n_steps)
+)
+
+intercept_lines <- data.frame(
+  x = c(intercept$x_values_2, intercept$x_values_3, intercept$x_values_4),
+  y = c(intercept$y_values, intercept$y_values, intercept$y_values),
+  alpha = factor(rep(alpha_values[1:3], each = length(intercept$y_values)))
+)
+
+# Create the scatter plot for portfolio values and distinguish different new risk measures for different alpha levels
+plot_portfolio_values(portfolio_df, intercept_lines, first_minimum_df, second_minimum_df, third_minimum_df, alpha_values, type = "short")
 ```
 
 
