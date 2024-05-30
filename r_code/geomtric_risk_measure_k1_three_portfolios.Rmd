@@ -336,7 +336,7 @@ cir_vol_paths <- cir_em(T = dt, n_steps = n_steps, n_paths = n_paths, kappa = ka
 stoc_vol <- sqrt(cir_vol_paths)
 ```
 
-```{r}
+```{r, out.width="100%"}
 # Buy-and-Hold portfolio with one threshold
 rho <- -0.3  # Correlation coefficient
 single_k1_threshold <- 0.25  # Threshold value for k1
@@ -405,7 +405,7 @@ for (i in seq_along(rho)) {
 }
 ```
 
-```{r}
+```{r, out.width="100%"}
 # Define the color palette
 colors <- viridis(length(rho))
 
@@ -466,7 +466,7 @@ for (i in 1:nrow(multiple_k_thresholds)) {
 }
 ```
 
-```{r}
+```{r, out.width="100%"}
 #' Loop through each value of rho
 for (i in seq_along(rho)) {
   rho_value <- rho[i]
@@ -548,7 +548,7 @@ rownames(result_df) <- NULL
 kable(result_df, format = "markdown")
 ```
 
-```{r}
+```{r, out.width="100%"}
 #' Loop through each value of rho
 for (i in seq_along(rho)) {
   rho_value <- rho[i]
@@ -641,7 +641,7 @@ kable(result_df, format = "markdown")
 ```
 
 
-```{r}
+```{r, out.width="100%"}
 #' Loop through each value of rho
 for (i in seq_along(rho)) {
   rho_value <- rho[i]
@@ -733,5 +733,134 @@ rownames(result_df) <- NULL
 kable(result_df, format = "markdown")
 ```
 
+```{r, out.width="100%"}
+# Consider the largest K1 amount to include all the portfolio values
+k1 <- 1
+rho <- 0.5
+weight_q <- 0.25
+alpha_values <- c(0.01, 0.05, 0.10)
+
+# Calculate dW2 using the correlation coefficient rho
+dW2 <- (rho * dW1) + (sqrt(1 - rho^2) * dZ)
+
+# Simulate the risky asset price paths using geometric Brownian motion with the correlated dW2
+s_paths_gbm <- simulate_gbm(mu=mu, sigma=stoc_vol, T=dt, n_steps=n_steps, n_paths=n_paths, s0=s0, dW=dW2)
+
+# Exclude proportion that are extreme
+log_of_asset_prices <- log1p(s_paths_gbm)  # Log transformation of asset prices
+
+# Calculate the threshold value R_t based on initial conditions
+threshold_r_t <- (mu - (0.5 * long_term_vol^2)) * (0:n_steps * dt) + log_s0
+
+# Pre-compute the portfolio value at time T for each path
+portfolio_value_T <- buy_hold_portfolio_payoff_T(s=s_paths_gbm, s0=s0, r=risk_free_rate, T=T)
+value_of_portfolio_T_2 <- buy_hold_portfolio_payoff_T_2(s=s_paths_gbm, s0=s0, r=risk_free_rate, T=T, n_steps=n_steps)
+
+# Find the minimum distance. If it is negative then they are below (threshold - k1), so we remove them
+min_distances <- apply(log_of_asset_prices - (threshold_r_t - k1), 1, min)
+min_distances[min_distances < 0] <- NA
+
+# Ensure that the distances are set to NA if corresponding portfolio value is NA
+min_distances[is.na(portfolio_value_T)] <- NA
+
+# Average realized volatility from the CIR process simulations
+average_realized_volatility <- rowMeans(sqrt(cir_vol_paths))
+
+# Create data frame to store calculated values
+portfolio_df <- data.frame(
+  Average_Realized_Volatility = average_realized_volatility,
+  Portfolio_Value_T = portfolio_value_T,
+  Portfolio_Value_T_2 = value_of_portfolio_T_2,
+  Min_Distances = min_distances
+)
+
+# Add risk measure selection to portfolio_df
+portfolio_df$Ex3_Risk_Measure <- ((1 - weight_q) * portfolio_df$Portfolio_Value_T) + (weight_q * portfolio_df$Portfolio_Value_T_2)
+
+# Calculate percent omitted
+percent_omitted <- (sum(is.na(portfolio_df$Portfolio_Value_T)) / n_paths) * 100
+
+# Calculate new risk measure value
+new_risk_measure_value <- (-1) * min(portfolio_df$Portfolio_Value_T, na.rm = TRUE)
+cat(sprintf('The full time risk measure for buy-and-hold position is %.5f with correlation value of %.2f and K1 = %.2f\n',
+            new_risk_measure_value, rho, single_k1_threshold))
+
+# Calculate example 3 new risk measure value
+ex3_risk_measure_value <- (-1) * min(portfolio_df$Ex3_Risk_Measure, na.rm = TRUE)
+cat(sprintf('The half time risk measure for buy-and-hold position is %.5f with correlation value of %.2f and K1 = %.2f\n',
+            ex3_risk_measure_value, rho, single_k1_threshold))
+
+# Put the portfolio values in order and remove NA values
+portfolio_df <- portfolio_df[!is.na(portfolio_df$Portfolio_Value_T), ]
+portfolio_df <- portfolio_df[order(portfolio_df$Min_Distances), ]
+
+# Now find and discard alpha values from the left. These are the distances that are closest to the y-axis.
+# After discarding alpha portfolio values, find the minimum points (our risk measures).
+second_portfolio_df <- tail(portfolio_df, n_paths - (n_paths * alpha_values[1]))
+first_minimum_df <- second_portfolio_df[second_portfolio_df$Portfolio_Value_T == min(second_portfolio_df$Portfolio_Value_T), ]
+
+third_portfolio_df <- tail(portfolio_df, n_paths - (n_paths * alpha_values[2]))
+second_minimum_df <- third_portfolio_df[third_portfolio_df$Portfolio_Value_T == min(third_portfolio_df$Portfolio_Value_T), ]
+
+fourth_portfolio_df <- tail(portfolio_df, n_paths - (n_paths * alpha_values[3]))
+third_minimum_df <- fourth_portfolio_df[fourth_portfolio_df$Portfolio_Value_T == min(fourth_portfolio_df$Portfolio_Value_T), ]
+
+# Create the intercepts for alpha values. A line in the plot is an intercept which shows the
+# exclusion of alpha amount trajectories.
+upper_intercept <- portfolio_df[portfolio_df$Portfolio_Value_T == max(portfolio_df$Portfolio_Value_T), ]
+lower_intercept <- portfolio_df[portfolio_df$Portfolio_Value_T == min(portfolio_df$Portfolio_Value_T), ]
+
+intercept <- data.frame(
+  y_values = seq(from = as.numeric(lower_intercept$Portfolio_Value_T) - 5, to = as.numeric(upper_intercept$Portfolio_Value_T), length.out = n_steps),
+  x_values_1 = rep(k1, n_steps),
+  x_values_2 = rep(as.numeric(second_portfolio_df$Min_Distances[1]), n_steps),
+  x_values_3 = rep(as.numeric(third_portfolio_df$Min_Distances[1]), n_steps),
+  x_values_4 = rep(as.numeric(fourth_portfolio_df$Min_Distances[1]), n_steps)
+)
+
+# Create data frames for the intercept lines
+intercept_lines <- data.frame(
+  x = c(intercept$x_values_2, intercept$x_values_3, intercept$x_values_4),
+  y = c(intercept$y_values, intercept$y_values, intercept$y_values),
+  alpha = factor(rep(alpha_values, each = length(intercept$x_values_2)))
+)
+
+# Create the initial scatter plot for portfolio values
+p <- ggplot(portfolio_df, aes(x = Min_Distances, y = Portfolio_Value_T)) +
+  geom_point(color = "black", alpha = 0.5, size = 1.5) +
+  labs(x = expression(M(t) == min(f(t) - g(t))), y = expression(V[phi](omega, T)),
+       title = expression(Portfolio~Value~V[phi](omega, T)~vs.~Minimum~Distance~M(t))) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Add intercept lines for each alpha value with color
+p <- p + geom_line(data = intercept_lines, aes(x = x, y = y, color = alpha), size = 1) +
+  scale_color_manual(values = c("blue", "green", "red"), 
+                     labels = c(TeX(sprintf(r'($\alpha = %f$)', alpha_values))),
+                     name = "Alpha Values")
+
+# Highlight and annotate the first minimum points
+p <- p + geom_point(data = first_minimum_df, aes(x = Min_Distances, y = Portfolio_Value_T), color = "blue", size = 3) +
+  geom_label(data = first_minimum_df, aes(x = Min_Distances, y = Portfolio_Value_T - 40, label = paste("risk measure =", round(Portfolio_Value_T, 2))), 
+             size = 3, color = "blue", fill = "lightblue", label.size = 0.25, vjust = -1)
+
+# Highlight and annotate the second minimum points
+p <- p + geom_point(data = second_minimum_df, aes(x = Min_Distances, y = Portfolio_Value_T), color = "green", size = 3) +
+  geom_label(data = second_minimum_df, aes(x = Min_Distances, y = Portfolio_Value_T - 30, label = paste("risk measure =", round(Portfolio_Value_T, 2))), 
+             size = 3, color = "green", fill = "pink", label.size = 0.25, vjust = -1)
+
+# Highlight and annotate the third minimum points
+p <- p + geom_point(data = third_minimum_df, aes(x = Min_Distances, y = Portfolio_Value_T), color = "red", size = 3) +
+  geom_label(data = third_minimum_df, aes(x = Min_Distances, y = Portfolio_Value_T - 20, label = paste("risk measure =", round(Portfolio_Value_T, 2))), 
+             size = 3, color = "red", fill = "lightgrey", label.size = 0.25, vjust = -1)
+
+
+# Add legend
+p <- p + theme(legend.position = "right") +
+  guides(color = guide_legend(title = TeX('$\\alpha$ Values')))
+
+# Display the plot
+print(p)
+```
 
 
